@@ -245,33 +245,35 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
                     inkbirds[obj_path].Disconnect()
                     return True
                 gatt_services[path]=True
-        n=0
-        try:
-            for n,i in enumerate( bind[obj_path] ):
-                bind_notify(*i)
-        except Exception as e:
-            print( f"Binding failed on {i} object: {e}" )
-            bind[obj_path]=[]
-            inkbirds[obj_path].Disconnect()
-            return True
+                
+        if obj_path in bind and bind[obj_path]:
+            try:
+                for n,i in enumerate( bind[obj_path] ):
+                    bind_notify(*i)
+            except Exception as e:
+                print( f"Binding failed during loop: {e}" )
+                bind[obj_path]=[]
+                inkbirds[obj_path].Disconnect()
+                return True
+        else:
+            print(f"No bind entries for {obj_path} yet, waiting for GATT discovery")
         
         print("Pseudo Pairing")
-        try:
-            commands[ obj_path ].WriteValue( 
-                Variant('ay',[0xfd,0x00,0x00,0x00,0x00,0x00,0x00]), { 'type':Variant('s','request') } 
-        )
-        except Exception as e:
-            print( f"Pseudo Pairing failed:{e}" )
-            pass
-        return True
+        if obj_path in commands:  
+            try:
+                commands[ obj_path ].WriteValue( 
+                    Variant('ay',[0xfd,0x00,0x00,0x00,0x00,0x00,0x00]), { 'type':Variant('s','request') } 
+            )
+            except Exception as e:
+                print( f"Pseudo Pairing failed:{e}" )
+                pass
+            return True
+        else:
+            print(f"No command characteristics for {obj_path} yet")
     else:
         print("ServiceResolved -> False")
         teardown_device(obj_path)
         return True
-        
-    print("Services Delete",obj_path)
-    deallocate(obj_path)
-    return True
 
 def interface_added_callback( obj_path, obj_dict ):
     if DEVICE_IFACE in obj_dict:
