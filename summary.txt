@@ -1,4 +1,4 @@
-# Deadlock Fix Summary (Milestone 1)
+# Deadlock Fix Summary
 # Problem: After power cycle/failure, BlueZ doesn't emit InterfacesAdded again (stale cache/object state).
 # Root: No InterfacesRemoved handling + lingering proxy refs (dasbus relies on Python GC).
 # Fixes:
