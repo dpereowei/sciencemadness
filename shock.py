@@ -233,6 +233,17 @@ def bind_notify( proxy, callback, o_path ):
     )
     proxy.StartNotify()
 
+def retry_bind(obj_path):
+    if obj_path in bind and bind[obj_path]:
+        try:
+            for n, i in enumerate(bind[obj_path]):
+                bind_notify(*i)
+            print(f"Retry bind successful for {obj_path}")
+        except Exception as e:
+            print(f"Retry bind failed: {e}")
+    else:
+        print(f"Retry bind: still no entries for {obj_path}")
+
 def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
     if not 'ServicesResolved' in obj_dict:
         return False
@@ -257,6 +268,8 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
                 return True
         else:
             print(f"No bind entries for {obj_path} yet, waiting for GATT discovery")
+            threading.Timer(3.0, lambda: retry_bind(obj_path)).start()
+            return True
         
         print("Pseudo Pairing")
         if obj_path in commands:  
@@ -333,6 +346,7 @@ def interface_added_callback( obj_path, obj_dict ):
         if parent_path in gatt_services:
             if gatt_services[parent_path]: return True # Proxies are already bound
             uuid = obj_dict[GATT_CHAR_IFACE]["UUID"].unpack()
+            print(f"Discovered characteristic UUID: {uuid} at path {obj_path} for device")
             proxy = bus.get_proxy( SERVICE_NAME, obj_path )
             dev_path = os.path.dirname(parent_path)
             if "0000ff01-0000-1000-8000-00805f9b34fb"==uuid:
