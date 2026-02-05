@@ -1,0 +1,9 @@
+# Deadlock Fix Summary (Milestone 1)
+# Problem: After power cycle/failure, BlueZ doesn't emit InterfacesAdded again (stale cache/object state).
+# Root: No InterfacesRemoved handling + lingering proxy refs (dasbus relies on Python GC).
+# Fixes:
+# - InterfacesRemoved.connect() → catch removals, call teardown.
+# - teardown_device(): StopNotify/Disconnect → drop refs (weakref + explicit pop) → RemoveDevice (flushes BlueZ).
+# - Calls in ServicesResolved=False, signal_handler, proactive scan check.
+# Result: Devices rediscoverable without restarting bluetoothd/script.
+# Tested with generic BLE; ready for Inkbird validation if needed.
