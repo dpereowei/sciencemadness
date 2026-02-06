@@ -268,7 +268,7 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
                 return True
         else:
             print(f"No bind entries for {obj_path} yet, waiting for GATT discovery")
-            threading.Timer(3.0, lambda: retry_bind(obj_path)).start()
+            threading.Timer(10.0, lambda: retry_bind(obj_path)).start()
             return True
         
         print("Pseudo Pairing")
@@ -327,12 +327,25 @@ def interface_added_callback( obj_path, obj_dict ):
                 lambda  a,b,c : services_resolved_callback( obj_path, a,b,c )
             )
         new_inkbird.Connect()
+        new_inkbird.Trusted = True
+        print("Trusted set early for", obj_path)
+        time.sleep(5)
+        managed = manager.GetManagedObjects()
+        for p, d in managed.items():
+            if p.startswith(obj_path):
+                interface_added_callback(p, d)
         return True
+        
 
     parent_path = os.path.dirname(obj_path)
     if GATT_SERVICE_IFACE in obj_dict:
         if obj_path in gatt_services: return True
         properties=obj_dict[GATT_SERVICE_IFACE]
+        
+        uuid = properties["UUID"].unpack()
+        device_path = properties["Device"].unpack()
+        print(f"GATT Service discovered: UUID={uuid}, Path={obj_path}, Device={device_path}")
+        
         if properties["UUID"].unpack()==TEMPERATURE_UUID:
             if properties["Device"].unpack() in inkbirds:
                 gatt_services[ obj_path ]=False
@@ -376,7 +389,7 @@ def interfaces_removed_callback(path, interfaces):
 
 def logger():
     global stamp,laststamp
-    if (stamp==False and (time.time()-laststamp)>30):
+    if (stamp==False and (time.time()-laststamp)>60):
         print("logger stalled, attempting to clear.")
         for services in gatt_services:
             if gatt_services[services] is True:
