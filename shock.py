@@ -174,7 +174,8 @@ def update_temperatures( obj_path, data ):
     if data[8:12] != [0xFE,0x7F,0xFE,0x7F]:
         print( "Suspicious temperature packet", data )
         return # Do not process questionable packets.
-    t4vec = [ temperature( *data[2*i:2*i+2] ) for i in range(0,4) ] 
+    t4vec = [ temperature( *data[2*i:2*i+2] ) for i in range(0,4) ]
+    print(f"Parsed temperatures for {obj_path}: {t4vec}") 
     offset = allocated_offsets[ obj_path ]
     for i,value in enumerate( t4vec ):
         vlast = thermostamp[offset+i]
@@ -204,7 +205,6 @@ def temperature_callback( obj_path, obj_iface, obj_dict, invalidated ):
                 print("Allocated offset on late notify for", obj_path)
             else:
                 print("Temperature notify for disconnected inkbird:", obj_path, allocated_offsets)
-            return False
         update_temperatures( obj_path, obj_dict['Value'].unpack() )
     return True
 
@@ -245,60 +245,69 @@ def retry_bind(obj_path):
     else:
         print(f"Retry bind: still no entries for {obj_path}")
 
-def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
-    if not 'ServicesResolved' in obj_dict:
+def run_pseudo_pairing(obj_path):
+    """Core logic: send start command, init sequence, start notifications, bind callbacks"""
+    if obj_path not in commands:
+        print(f"Cannot run pseudo-pairing yet: ff02 missing on {obj_path}")
         return False
-    if obj_dict['ServicesResolved'].unpack()==True:
-        print( "ServicesResolved." )
-        for path in gatt_services:
-            if path.startswith( obj_path ):
-                if gatt_services[path]==False and len(bind[obj_path])<6:
-                    print("Service has wrong size. Disconnecting:",obj_path)
-                    inkbirds[obj_path].Disconnect()
-                    return True
-                gatt_services[path]=True
-                
-        if obj_path in bind and bind[obj_path]:
-            try:
-                for n,i in enumerate( bind[obj_path] ):
-                    bind_notify(*i)
-            except Exception as e:
-                print( f"Binding failed during loop: {e}" )
-                bind[obj_path]=[]
-                inkbirds[obj_path].Disconnect()
-                return True
-        else:
-            print(f"No bind entries for {obj_path} yet, waiting for GATT discovery")
-            threading.Timer(5.0, lambda: retry_bind(obj_path)).start()
-            threading.Timer(15.0, lambda: retry_bind(obj_path)).start()
-            return True
-        
-        print("Pseudo Pairing")
-        if obj_path in commands:  
-            try:
-                commands[ obj_path ].WriteValue( 
-                    Variant('ay',[0xfd,0x00,0x00,0x00,0x00,0x00,0x00]), { 'type':Variant('s','request') } 
-                )
-                print("Pseudo-pairing write sent successfully to ff02")
-                print("Sending full pseudo-pairing sequence")
-                reinitialize_inkbird(obj_path)
-                
-                if obj_path in temperatures:
-                    try:
-                        temperatures[obj_path].StartNotify()
-                        print("Starting notification as ff01")
-                    except Exception as e:
-                        print(f"StartNotify failed: {e}")
-            except Exception as e:
-                print( f"Pseudo Pairing failed:{e}" )
-        else:
-            print("Cannot send pseudo-pairing: no ff02 command char bound yet")
-        return True
-        
-    else:
-        print("ServiceResolved -> False")
+
+    print(f"Running pseudo-pairing for {obj_path}")
+    
+    try:
+        start_cmd = [0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        commands[obj_path].WriteValue(Variant('ay', start_cmd), {'type': Variant('s', 'request')})
+        print(f"START sent: {bytes(start_cmd).hex()}")
+    except Exception as e:
+        print(f"START failed: {e}")
+        return False
+
+    reinitialize_inkbird(obj_path)
+
+    if obj_path in temperatures:
+        try:
+            temperatures[obj_path].StartNotify()
+            print("ff01 notifications started")
+        except Exception as e:
+            print(f"ff01 StartNotify failed: {e}")
+
+    if obj_path in bind and bind[obj_path]:
+        try:
+            for proxy, cb, path in bind[obj_path]:
+                bind_notify(proxy, cb, path)
+            print("Callbacks bound")
+        except Exception as e:
+            print(f"Binding failed: {e}")
+
+    print("Pseudo Pairing completed")
+    return True
+
+
+def services_resolved_callback(obj_path, obj_iface, obj_dict, invalidated):
+    if 'ServicesResolved' not in obj_dict:
+        return False
+
+    resolved = obj_dict['ServicesResolved'].unpack()
+    if not resolved:
+        print(f"ServicesResolved → False: {obj_path}")
         teardown_device(obj_path)
         return True
+
+    print(f"ServicesResolved → True: {obj_path}")
+
+    if run_pseudo_pairing(obj_path):
+        return True
+    else:
+        print("ff02 not ready — scheduling retry")
+        threading.Timer(3.0, lambda: retry_pseudo_pairing(obj_path)).start()
+        return True
+
+
+def retry_pseudo_pairing(obj_path):
+    if run_pseudo_pairing(obj_path):
+        print(f"Retry succeeded for {obj_path}")
+    else:
+        print(f"Still waiting for ff02 on {obj_path}")
+        threading.Timer(4.0, lambda: retry_pseudo_pairing(obj_path)).start()
 
 def interface_added_callback( obj_path, obj_dict ):
     if DEVICE_IFACE in obj_dict:
