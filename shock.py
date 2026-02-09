@@ -197,12 +197,13 @@ def update_temperatures( obj_path, data ):
 
 def temperature_callback( obj_path, obj_iface, obj_dict, invalidated ):
     if ( "Value" in obj_dict ):
-        if not (obj_path in allocated_offsets ):
-            if inkbirds[obj_path].Connected == True:
+        if (obj_path in inkbirds) and not (obj_path in allocated_offsets):
+            if inkbirds[obj_path].Connected:
                 allocate(obj_path)
-                inkbirds[obj_path].Trusted=True
+                inkbirds[obj_path].Trusted = True
+                print("Allocated offset on late notify for", obj_path)
             else:
-                print( "Temperature notify for disconnected inkbird:", obj_path, allocated_offsets )
+                print("Temperature notify for disconnected inkbird:", obj_path, allocated_offsets)
             return False
         update_temperatures( obj_path, obj_dict['Value'].unpack() )
     return True
@@ -268,7 +269,8 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
                 return True
         else:
             print(f"No bind entries for {obj_path} yet, waiting for GATT discovery")
-            threading.Timer(10.0, lambda: retry_bind(obj_path)).start()
+            threading.Timer(5.0, lambda: retry_bind(obj_path)).start()
+            threading.Timer(15.0, lambda: retry_bind(obj_path)).start()
             return True
         
         print("Pseudo Pairing")
@@ -276,13 +278,23 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
             try:
                 commands[ obj_path ].WriteValue( 
                     Variant('ay',[0xfd,0x00,0x00,0x00,0x00,0x00,0x00]), { 'type':Variant('s','request') } 
-            )
+                )
+                print("Pseudo-pairing write sent successfully to ff02")
+                print("Sending full pseudo-pairing sequence")
+                reinitialize_inkbird(obj_path)
+                
+                if obj_path in temperatures:
+                    try:
+                        temperatures[obj_path].StartNotify()
+                        print("Starting notification as ff01")
+                    except Exception as e:
+                        print(f"StartNotify failed: {e}")
             except Exception as e:
                 print( f"Pseudo Pairing failed:{e}" )
-                pass
-            return True
         else:
-            print(f"No command characteristics for {obj_path} yet")
+            print("Cannot send pseudo-pairing: no ff02 command char bound yet")
+        return True
+        
     else:
         print("ServiceResolved -> False")
         teardown_device(obj_path)
@@ -389,8 +401,8 @@ def interfaces_removed_callback(path, interfaces):
 
 def logger():
     global stamp,laststamp
-    if (stamp==False and (time.time()-laststamp)>60):
-        print("logger stalled, attempting to clear.")
+    if (stamp==False and (time.time()-laststamp)>120):
+        print("logger stalled (no valid data yet), attempting to clear...")
         for services in gatt_services:
             if gatt_services[services] is True:
                 obj_path = os.path.dirname( services ) 
