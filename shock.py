@@ -30,14 +30,13 @@ from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop
 from dasbus.typing import Variant
 from dasbus.signal import Signal
-
 import weakref
 
 # Characteristic properties bitmask
 # [Extended][Auth_Sign][Indicate][Notify]  [Write][Write-NoResp][Read][Broadcast]
 
 MAXTEMP = 1802.5
-WATCHTIME = 90.1 
+WATCHTIME = 45.0
 INKBIRD_NAME='IDT-34c-B'
 FRIENDLY_NAME='INKBIRD'
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -80,7 +79,7 @@ def signal_handler( signum, frame ):
         teardown_device(path)
     if loop is not None:
         loop.quit()
-    exit(2)
+    exit(0)
 
 def deallocate(obj_path):
     if obj_path in allocated_offsets:
@@ -97,7 +96,8 @@ def allocate(obj_path):
             if offset > free_offsets[key]:
                 best,offset = key,free_offsets[key]
     allocated_offsets[obj_path] = offset
-    del free_offsets[best]
+    if best in free_offsets:
+        del free_offsets[best]
     
 def teardown_device(dev_path):
     """Force clean disconnect, reference drop, and BlueZ cache flush.
