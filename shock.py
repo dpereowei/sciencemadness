@@ -171,7 +171,7 @@ def update_temperatures( obj_path, data ):
     def temperature( lsbyte, msbyte ):
         value = ((msbyte^0x80)<<8)+lsbyte - 0x8000
         return (value-320)/18   # Convert to celsius
-    if data[8:12] != [0xFE,0x7F,0xFE,0x7F]:
+    if len(data) < 12 or data[8:12] != [0xFE,0x7F,0xFE,0x7F]:
         print( "Suspicious temperature packet", data )
         return # Do not process questionable packets.
     t4vec = [ temperature( *data[2*i:2*i+2] ) for i in range(0,4) ]
@@ -197,8 +197,8 @@ def update_temperatures( obj_path, data ):
             stamp = True
 
 def temperature_callback( obj_path, obj_iface, obj_dict, invalidated ):
-    if ( "Value" in obj_dict ):
-        if (obj_path in inkbirds) and not (obj_path in allocated_offsets):
+    if "Value" in obj_dict:
+        if obj_path in inkbirds and obj_path not in allocated_offsets:
             if inkbirds[obj_path].Connected:
                 allocate(obj_path)
                 inkbirds[obj_path].Trusted = True
@@ -206,11 +206,10 @@ def temperature_callback( obj_path, obj_iface, obj_dict, invalidated ):
             else:
                 print("Temperature notify for disconnected inkbird:", obj_path, allocated_offsets)
         update_temperatures( obj_path, obj_dict['Value'].unpack() )
-    return True
 
 def command_callback( obj_path, obj_iface, obj_dict, invalidated ):
-    print( "Command notify\t\t", obj_path,invalidated )
-    if ( "Value" in obj_dict ):
+    print( "Command notify\t\t", obj_path, invalidated )
+    if "Value" in obj_dict:
         Value = obj_dict['Value'].unpack()
         print( "Value=",Value )
     return True
@@ -246,29 +245,31 @@ def retry_bind(obj_path):
         print(f"Retry bind: still no entries for {obj_path}")
 
 def run_pseudo_pairing(obj_path):
-    """Core logic: send start command, init sequence, start notifications, bind callbacks"""
     if obj_path not in commands:
         print(f"Cannot run pseudo-pairing yet: ff02 missing on {obj_path}")
         return False
 
     print(f"Running pseudo-pairing for {obj_path}")
-    
+
+    if obj_path in temperatures:
+        try:
+            temperatures[obj_path].StartNotify()
+            print(f"ff01 notifications ENABLED early on {obj_path}")
+            time.sleep(0.4)  # let subscription settle
+        except Exception as e:
+            print(f"ff01 StartNotify failed: {e}")
+            return False
+
     try:
         start_cmd = [0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         commands[obj_path].WriteValue(Variant('ay', start_cmd), {'type': Variant('s', 'request')})
-        print(f"START sent: {bytes(start_cmd).hex()}")
+        print(f"START sent: {bytes(start_cmd).hex()} on {obj_path}")
+        time.sleep(0.5)  # give firmware time to start streaming
     except Exception as e:
         print(f"START failed: {e}")
         return False
 
     reinitialize_inkbird(obj_path)
-
-    if obj_path in temperatures:
-        try:
-            temperatures[obj_path].StartNotify()
-            print("ff01 notifications started")
-        except Exception as e:
-            print(f"ff01 StartNotify failed: {e}")
 
     if obj_path in bind and bind[obj_path]:
         try:
@@ -300,7 +301,6 @@ def services_resolved_callback(obj_path, obj_iface, obj_dict, invalidated):
         print("ff02 not ready — scheduling retry")
         threading.Timer(3.0, lambda: retry_pseudo_pairing(obj_path)).start()
         return True
-
 
 def retry_pseudo_pairing(obj_path):
     if run_pseudo_pairing(obj_path):
