@@ -24,10 +24,56 @@ adapter = bus.get_proxy(SERVICE_NAME, ADAPTER_PATH)
 inkbird_device = None
 temp_char = None
 cmd_char = None
+thermostamp = [float('NaN')] * 4  # only 1 device for min.py
+fout = open("/tmp/min_thermal.dat", 'w')
+stamp = False
+
+def logger():
+    global stamp
+    if stamp:
+        t = time.time()
+        stamp = False
+        line = f"{t:6.2f}   " + "  ".join(f"{v:5.1f}" for v in thermostamp if not isnan(v))
+        print(line)
+        print(line, file=fout)
+        fout.flush()
+    threading.Timer(1, logger).start()
+
+def temperature_callback(path, iface, changed, invalidated):
+    if "Value" in changed:
+        data = changed["Value"].unpack()
+        print(f"RAW ff01 notify on {path}: {data} (len={len(data)})")
+        parsed = parse_temperatures(data)
+        if parsed:
+            print(f"Parsed temps: {parsed}")
+
+def parse_temperatures(data):
+    if len(data) < 12 or data[8:12] != [0xFE, 0x7F, 0xFE, 0x7F]:
+        print("Suspicious packet:", data)
+        return None
+    def temp(ls, ms):
+        val = ((ms ^ 0x80) << 8) + ls - 0x8000
+        return round((val - 320) / 18, 1)
+    return [
+        temp(data[0], data[1]),
+        temp(data[2], data[3]),
+        temp(data[4], data[5]),
+        temp(data[6], data[7])
+    ]
+
+def scan_for_inkbird():
+    managed = manager.GetManagedObjects()
+    for path, interfaces in managed.items():
+        on_interfaces_added(path, interfaces)
 
 def on_properties_changed(path, iface, changed, invalidated):
-    if "Connected" in changed and changed["Connected"].unpack():
-        print(f"Device connected: {path}")
+    if "Connected" in changed:
+            if changed["Connected"].unpack():
+                print(f"Connected: {path}")
+            else:
+                print(f"Disconnected: {path} — will retry scan")
+                threading.Timer(5, scan_for_inkbird).start()
+    
     if "ServicesResolved" in changed and changed["ServicesResolved"].unpack():
         print("Services resolved → attempting activation")
         activate_device(path)
@@ -60,6 +106,7 @@ def activate_device(device_path):
 
     try:
         temp_char.StartNotify()
+        temp_char.PropertiesChanged.connect(temperature_callback)
         print("Notifications enabled on ff01")
         time.sleep(0.4)
     except Exception as e:
@@ -111,6 +158,7 @@ def main():
         on_interfaces_added(path, interfaces)
 
     loop.run()
+    threading.Timer(1, logger).start()
 
 if __name__ == "__main__":
     try:
