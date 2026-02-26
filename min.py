@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Minimal Inkbird IDT-34c-B temperature reader – single device focus
-Goal: Connect → Activate → Receive & print temperatures
+Fixed callback binding with lambda to pass device path
 """
 
 import time
@@ -9,6 +9,7 @@ import threading
 from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop
 from dasbus.typing import Variant
+import math  # for isnan
 
 SERVICE_NAME = "org.bluez"
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -20,32 +21,13 @@ loop = EventLoop()
 manager = bus.get_proxy(SERVICE_NAME, "/")
 adapter = bus.get_proxy(SERVICE_NAME, ADAPTER_PATH)
 
-# We'll store the device proxy and characteristics here
 inkbird_device = None
 temp_char = None
 cmd_char = None
-thermostamp = [float('NaN')] * 4  # only 1 device for min.py
+
+# Global for single device (later we can use dict for multi)
+thermostamp = [float('NaN')] * 4
 fout = open("/tmp/min_thermal.dat", 'w')
-stamp = False
-
-def logger():
-    global stamp
-    if stamp:
-        t = time.time()
-        stamp = False
-        line = f"{t:6.2f}   " + "  ".join(f"{v:5.1f}" for v in thermostamp if not isnan(v))
-        print(line)
-        print(line, file=fout)
-        fout.flush()
-    threading.Timer(1, logger).start()
-
-def temperature_callback(path, iface, changed, invalidated):
-    if "Value" in changed:
-        data = changed["Value"].unpack()
-        print(f"RAW ff01 notify on {path}: {data} (len={len(data)})")
-        parsed = parse_temperatures(data)
-        if parsed:
-            print(f"Parsed temps: {parsed}")
 
 def parse_temperatures(data):
     if len(data) < 12 or data[8:12] != [0xFE, 0x7F, 0xFE, 0x7F]:
@@ -61,19 +43,23 @@ def parse_temperatures(data):
         temp(data[6], data[7])
     ]
 
-def scan_for_inkbird():
-    managed = manager.GetManagedObjects()
-    for path, interfaces in managed.items():
-        on_interfaces_added(path, interfaces)
+def temperature_callback(obj_path, iface, changed, invalidated):
+    if "Value" in changed:
+        data = changed["Value"].unpack()
+        print(f"RAW ff01 notify from {obj_path}: {data} (len={len(data)})")
+        temps = parse_temperatures(data)
+        if temps:
+            print(f"Parsed temps: {temps}")
+            # Log to file
+            t = time.time()
+            line = f"{t:8.2f}   " + "  ".join(f"{v:5.1f}" if not math.isnan(v) else "  NaN" for v in temps)
+            print(line)
+            print(line, file=fout)
+            fout.flush()
 
 def on_properties_changed(path, iface, changed, invalidated):
-    if "Connected" in changed:
-            if changed["Connected"].unpack():
-                print(f"Connected: {path}")
-            else:
-                print(f"Disconnected: {path} — will retry scan")
-                threading.Timer(5, scan_for_inkbird).start()
-    
+    if "Connected" in changed and changed["Connected"].unpack():
+        print(f"Device connected: {path}")
     if "ServicesResolved" in changed and changed["ServicesResolved"].unpack():
         print("Services resolved → attempting activation")
         activate_device(path)
@@ -95,20 +81,23 @@ def activate_device(device_path):
         if uuid == "0000ff01-0000-1000-8000-00805f9b34fb":
             temp_char = char_proxy
             print("Found temperature notify char (ff01)")
+            # Bind with lambda to pass device_path
+            temp_char.PropertiesChanged.connect(
+                lambda i, c, inv: temperature_callback(device_path, i, c, inv)
+            )
         elif uuid == "0000ff02-0000-1000-8000-00805f9b34fb":
             cmd_char = char_proxy
             print("Found command write char (ff02)")
 
     if not (temp_char and cmd_char):
-        print("Missing ff01 or ff02 – waiting longer...")
+        print("Missing ff01 or ff02 – retrying in 2s...")
         threading.Timer(2.0, lambda: activate_device(device_path)).start()
         return
 
     try:
         temp_char.StartNotify()
-        temp_char.PropertiesChanged.connect(temperature_callback)
         print("Notifications enabled on ff01")
-        time.sleep(0.4)
+        time.sleep(0.5)  # longer settle time
     except Exception as e:
         print(f"Failed to enable ff01 notify: {e}")
         return
@@ -116,12 +105,13 @@ def activate_device(device_path):
     try:
         cmd = [0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         cmd_char.WriteValue(Variant('ay', cmd), {'type': Variant('s', 'request')})
-        print(f"Activation command sent: fd000000000000")
+        print("Activation command sent: fd000000000000")
+        time.sleep(0.5)
     except Exception as e:
         print(f"Activation write failed: {e}")
         return
 
-    print("Activation sequence sent – waiting for data...")
+    print("Activation done – waiting for temperature data...")
 
 def on_interfaces_added(path, interfaces):
     global inkbird_device
@@ -153,17 +143,19 @@ def main():
     print("Starting minimal Inkbird reader – looking for IDT-34c-B...")
     manager.InterfacesAdded.connect(on_interfaces_added)
 
+    # Initial scan
     managed = manager.GetManagedObjects()
     for path, interfaces in managed.items():
         on_interfaces_added(path, interfaces)
 
     loop.run()
-    threading.Timer(1, logger).start()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print("\nStopped by user")
+        fout.close()
     except Exception as e:
         print(f"Main error: {e}")
+        fout.close()
