@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Minimal Inkbird IDT-34c-B reader – fixed logging + multi-device basics
+Minimal Inkbird reader – logging fixed + multi-device
 """
 
 import time
 import threading
 import datetime
+import math
 from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop
 from dasbus.typing import Variant
-import math
 
 SERVICE_NAME = "org.bluez"
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -21,8 +21,9 @@ loop = EventLoop()
 manager = bus.get_proxy(SERVICE_NAME, "/")
 adapter = bus.get_proxy(SERVICE_NAME, ADAPTER_PATH)
 
-# Dict for multi-device support
-devices = {}  # path -> {'proxy': proxy, 'temp_char': char, 'cmd_char': char, 'thermostamp': [NaN]*4}
+devices = {}  # path -> {'proxy':, 'temp_char':, 'cmd_char':, 'thermostamp': [NaN]*4, 'stamp': False}
+
+fout = open("/tmp/min_thermal.dat", 'a')  # append mode
 
 def ts():
     return datetime.datetime.now().strftime("%H:%M:%S")
@@ -53,30 +54,35 @@ def temperature_callback(device_path, iface, changed, invalidated):
             dev = devices.get(device_path)
             if dev:
                 dev['thermostamp'] = temps
-                # Log to file
-                t = time.time()
-                line = f"{t:8.2f}   " + "  ".join(f"{v:5.1f}" if not math.isnan(v) else "  NaN" for v in temps)
-                print(line)
-                with open("/tmp/min_thermal.dat", 'a') as f:
-                    print(line, file=f)
+                dev['stamp'] = True  # trigger logger
+
+def logger():
+    for path, dev in list(devices.items()):
+        if dev['stamp']:
+            dev['stamp'] = False
+            t = time.time()
+            temps = dev['thermostamp']
+            line = f"{t:8.2f}   " + "  ".join(f"{v:5.1f}" if not math.isnan(v) else "  NaN" for v in temps)
+            print(f"[{ts()}] Logging: {line}")
+            print(line, file=fout)
+            fout.flush()
+    threading.Timer(1.0, logger).start()
 
 def on_properties_changed(device_path, iface, changed, invalidated):
     if "Connected" in changed:
         connected = changed["Connected"].unpack()
         log(f"Device { 'connected' if connected else 'DISCONNECTED' }: {device_path}")
         if not connected:
-            # Cleanup and retry scan
-            if device_path in devices:
-                del devices[device_path]
+            devices.pop(device_path, None)
             threading.Timer(5.0, scan_for_inkbird).start()
 
     if "ServicesResolved" in changed and changed["ServicesResolved"].unpack():
-        log(f"Services resolved for {device_path} → activation")
+        log(f"Services resolved for {device_path}")
         activate_device(device_path)
 
 def activate_device(device_path):
     if device_path in devices:
-        log(f"Already activating {device_path} — skipping")
+        log(f"{device_path} already activating")
         return
 
     temp_char = None
@@ -104,38 +110,38 @@ def activate_device(device_path):
             log(f"Found ff02 for {device_path}")
 
     if not (temp_char and cmd_char):
-        log(f"Missing chars for {device_path} — retry in 2s")
+        log(f"Missing chars for {device_path} — retry")
         threading.Timer(2.0, lambda: activate_device(device_path)).start()
         return
 
     try:
         temp_char.StartNotify()
-        log(f"ff01 notifications enabled for {device_path}")
+        log(f"ff01 enabled for {device_path}")
         time.sleep(0.5)
     except Exception as e:
-        log(f"ff01 notify enable failed for {device_path}: {e}")
+        log(f"ff01 enable failed {device_path}: {e}")
         return
 
     try:
         cmd = [0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         cmd_char.WriteValue(Variant('ay', cmd), {'type': Variant('s', 'request')})
-        log(f"Activation sent for {device_path}: fd000000000000")
+        log(f"Activation sent {device_path}")
         time.sleep(0.5)
     except Exception as e:
-        log(f"Activation failed for {device_path}: {e}")
+        log(f"Activation failed {device_path}: {e}")
         return
 
-    # Store device state
     devices[device_path] = {
         'proxy': bus.get_proxy(SERVICE_NAME, device_path),
         'temp_char': temp_char,
         'cmd_char': cmd_char,
-        'thermostamp': [float('NaN')] * 4
+        'thermostamp': [float('NaN')] * 4,
+        'stamp': False
     }
-    log(f"Activation complete for {device_path} — expecting temps...")
+    log(f"Activation complete {device_path}")
 
 def scan_for_inkbird():
-    log("Scanning for Inkbird devices...")
+    log("Scanning for Inkbirds...")
     managed = manager.GetManagedObjects()
     for path, interfaces in managed.items():
         on_interfaces_added(path, interfaces)
@@ -159,30 +165,31 @@ def on_interfaces_added(path, interfaces):
 
         try:
             if proxy.Connected:
-                log(f"{path} already connected — skipping Connect()")
+                log(f"{path} already connected")
             else:
                 proxy.Connect()
-                log(f"Issued Connect() to {path}")
+                log(f"Connect issued to {path}")
             proxy.Trusted = True
         except Exception as e:
-            log(f"Connect failed for {path}: {e}")
+            log(f"Connect failed {path}: {e}")
 
 def periodic_scan():
     scan_for_inkbird()
     threading.Timer(15.0, periodic_scan).start()
 
 def main():
-    log("Minimal Inkbird reader starting...")
+    log("Starting reader...")
     manager.InterfacesAdded.connect(on_interfaces_added)
-    scan_for_inkbird()  # initial
+    scan_for_inkbird()
     threading.Timer(15.0, periodic_scan).start()
+    threading.Timer(1.0, logger).start()
     loop.run()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log("Stopped by user")
+        log("Stopped")
     except Exception as e:
         log(f"Main error: {e}")
     finally:
