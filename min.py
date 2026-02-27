@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Minimal Inkbird IDT-34c-B temperature reader – with disconnect/reconnect handling
+Minimal Inkbird IDT-34c-B reader – fixed logging + multi-device basics
 """
 
 import time
 import threading
+import datetime
 from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop
 from dasbus.typing import Variant
@@ -20,53 +21,66 @@ loop = EventLoop()
 manager = bus.get_proxy(SERVICE_NAME, "/")
 adapter = bus.get_proxy(SERVICE_NAME, ADAPTER_PATH)
 
-inkbird_device = None
-temp_char = None
-cmd_char = None
+# Dict for multi-device support
+devices = {}  # path -> {'proxy': proxy, 'temp_char': char, 'cmd_char': char, 'thermostamp': [NaN]*4}
 
-thermostamp = [float('NaN')] * 4
-fout = open("/tmp/min_thermal.dat", 'w')
+def ts():
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+def log(msg):
+    print(f"[{ts()}] {msg}")
 
 def parse_temperatures(data):
     if len(data) < 12 or data[8:12] != [0xFE, 0x7F, 0xFE, 0x7F]:
-        print("Suspicious packet:", data)
+        log(f"Suspicious packet: {data}")
         return None
     def temp(ls, ms):
         val = ((ms ^ 0x80) << 8) + ls - 0x8000
         return round((val - 320) / 18, 1)
     t4vec = [temp(data[2*i], data[2*i+1]) for i in range(4)]
     if any(t > 1000 for t in t4vec):
-        print("Invalid high temps — skipping")
+        log("Invalid high temps — skipping")
         return None
     return t4vec
 
-def temperature_callback(obj_path, iface, changed, invalidated):
+def temperature_callback(device_path, iface, changed, invalidated):
     if "Value" in changed:
         data = changed["Value"].unpack()
-        print(f"RAW ff01 notify from {obj_path}: {data}")
+        log(f"RAW ff01 notify from {device_path}: {data}")
         temps = parse_temperatures(data)
         if temps:
-            print(f"Parsed temps: {temps}")
-            t = time.time()
-            line = f"{t:8.2f}   " + "  ".join(f"{v:5.1f}" if not math.isnan(v) else "  NaN" for v in temps)
-            print(line)
-            print(line, file=fout)
-            fout.flush()
+            log(f"Parsed temps from {device_path}: {temps}")
+            dev = devices.get(device_path)
+            if dev:
+                dev['thermostamp'] = temps
+                # Log to file
+                t = time.time()
+                line = f"{t:8.2f}   " + "  ".join(f"{v:5.1f}" if not math.isnan(v) else "  NaN" for v in temps)
+                print(line)
+                with open("/tmp/min_thermal.dat", 'a') as f:
+                    print(line, file=f)
 
-def on_properties_changed(path, iface, changed, invalidated):
+def on_properties_changed(device_path, iface, changed, invalidated):
     if "Connected" in changed:
-        if changed["Connected"].unpack():
-            print(f"Device connected: {path}")
-        else:
-            print(f"Device DISCONNECTED: {path} — retry scan in 5s")
+        connected = changed["Connected"].unpack()
+        log(f"Device { 'connected' if connected else 'DISCONNECTED' }: {device_path}")
+        if not connected:
+            # Cleanup and retry scan
+            if device_path in devices:
+                del devices[device_path]
             threading.Timer(5.0, scan_for_inkbird).start()
 
     if "ServicesResolved" in changed and changed["ServicesResolved"].unpack():
-        print("Services resolved → activation")
-        activate_device(path)
+        log(f"Services resolved for {device_path} → activation")
+        activate_device(device_path)
 
 def activate_device(device_path):
-    global temp_char, cmd_char
+    if device_path in devices:
+        log(f"Already activating {device_path} — skipping")
+        return
+
+    temp_char = None
+    cmd_char = None
 
     managed = manager.GetManagedObjects()
     for obj_path, interfaces in managed.items():
@@ -81,47 +95,52 @@ def activate_device(device_path):
 
         if uuid == "0000ff01-0000-1000-8000-00805f9b34fb":
             temp_char = char_proxy
-            print("Found ff01")
+            log(f"Found ff01 for {device_path}")
             temp_char.PropertiesChanged.connect(
                 lambda i, c, inv: temperature_callback(device_path, i, c, inv)
             )
         elif uuid == "0000ff02-0000-1000-8000-00805f9b34fb":
             cmd_char = char_proxy
-            print("Found ff02")
+            log(f"Found ff02 for {device_path}")
 
     if not (temp_char and cmd_char):
-        print("Missing chars — retry in 2s")
+        log(f"Missing chars for {device_path} — retry in 2s")
         threading.Timer(2.0, lambda: activate_device(device_path)).start()
         return
 
     try:
         temp_char.StartNotify()
-        print("ff01 notifications enabled")
+        log(f"ff01 notifications enabled for {device_path}")
         time.sleep(0.5)
     except Exception as e:
-        print(f"ff01 notify enable failed: {e}")
+        log(f"ff01 notify enable failed for {device_path}: {e}")
         return
 
     try:
         cmd = [0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         cmd_char.WriteValue(Variant('ay', cmd), {'type': Variant('s', 'request')})
-        print("Activation sent: fd000000000000")
+        log(f"Activation sent for {device_path}: fd000000000000")
         time.sleep(0.5)
     except Exception as e:
-        print(f"Activation failed: {e}")
+        log(f"Activation failed for {device_path}: {e}")
         return
 
-    print("Activation complete — expecting temps...")
+    # Store device state
+    devices[device_path] = {
+        'proxy': bus.get_proxy(SERVICE_NAME, device_path),
+        'temp_char': temp_char,
+        'cmd_char': cmd_char,
+        'thermostamp': [float('NaN')] * 4
+    }
+    log(f"Activation complete for {device_path} — expecting temps...")
 
 def scan_for_inkbird():
-    print("Scanning managed objects for Inkbird...")
+    log("Scanning for Inkbird devices...")
     managed = manager.GetManagedObjects()
     for path, interfaces in managed.items():
         on_interfaces_added(path, interfaces)
 
 def on_interfaces_added(path, interfaces):
-    global inkbird_device
-
     if DEVICE_IFACE in interfaces:
         props = interfaces[DEVICE_IFACE]
         try:
@@ -132,39 +151,39 @@ def on_interfaces_added(path, interfaces):
         if name not in ['IDT-34c-B', 'INKBIRD']:
             return
 
-        print(f"Found Inkbird: {path}")
-        inkbird_device = bus.get_proxy(SERVICE_NAME, path)
-        inkbird_device.PropertiesChanged.connect(
+        log(f"Found Inkbird: {path}")
+        proxy = bus.get_proxy(SERVICE_NAME, path)
+        proxy.PropertiesChanged.connect(
             lambda i, c, inv: on_properties_changed(path, i, c, inv)
         )
 
         try:
-            if inkbird_device.Connected:
-                print(f"Already connected — skipping Connect()")
+            if proxy.Connected:
+                log(f"{path} already connected — skipping Connect()")
             else:
-                inkbird_device.Connect()
-                print("Issued Connect()")
-            inkbird_device.Trusted = True
+                proxy.Connect()
+                log(f"Issued Connect() to {path}")
+            proxy.Trusted = True
         except Exception as e:
-            print(f"Connect failed: {e}")
+            log(f"Connect failed for {path}: {e}")
 
 def periodic_scan():
     scan_for_inkbird()
     threading.Timer(15.0, periodic_scan).start()
 
 def main():
-    print("Minimal Inkbird reader starting...")
+    log("Minimal Inkbird reader starting...")
     manager.InterfacesAdded.connect(on_interfaces_added)
     scan_for_inkbird()  # initial
-    threading.Timer(15.0, periodic_scan).start()  # every 15s
+    threading.Timer(15.0, periodic_scan).start()
     loop.run()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nStopped")
-        fout.close()
+        log("Stopped by user")
     except Exception as e:
-        print(f"Main error: {e}")
+        log(f"Main error: {e}")
+    finally:
         fout.close()
