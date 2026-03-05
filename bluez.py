@@ -241,7 +241,7 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
             if path.startswith( obj_path ):
                 if gatt_services[path]==False and len(bind[obj_path])<6:
                     print("Service has wrong size. Disconnecting:",obj_path)
-                    inkbird[obj_path].Disconnect()
+                    inkbirds[obj_path].Disconnect()
                     return True
                 gatt_services[path]=True
         n=0
