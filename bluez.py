@@ -236,14 +236,20 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
     if not 'ServicesResolved' in obj_dict:
         return False
     if obj_dict['ServicesResolved'].unpack()==True:
-        print( "ServicesResolved." )
-        for path in gatt_services:
-            if path.startswith( obj_path ):
-                if gatt_services[path]==False and len(bind[obj_path])<6:
-                    print("Service has wrong size. Disconnecting:",obj_path)
-                    inkbirds[obj_path].Disconnect()
-                    return True
-                gatt_services[path]=True
+        print( "ServicesResolved:", obj_path )
+        
+        # Rediscover GATT services/chars that belong to this device
+        for child_path, child_dict in manager.GetManagedObjects().items():
+            if child_path.startswith(obj_path) and child_path != obj_path:
+                interface_added_callback(child_path, child_dict)
+                
+        # verify bindings
+        if obj_path not in bind or len(bind[obj_path]) < 6:
+            print("Service has wrong size. Disconnecting:",obj_path)
+            inkbirds[obj_path].Disconnect()
+            return True
+        
+        # Bind notifications
         n=0
         try:
             for n,i in enumerate( bind[obj_path] ):
