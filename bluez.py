@@ -264,10 +264,10 @@ def services_resolved_callback( obj_path, obj_iface, obj_dict, invalidated ):
         try:
             commands[ obj_path ].WriteValue( 
                 Variant('ay',[0xfd,0x00,0x00,0x00,0x00,0x00,0x00]), { 'type':Variant('s','request') } 
-        )
+            )
+            reinitialize_inkbird(obj_path)
         except Exception as e:
             print( f"Pseudo Pairing failed:{e}" )
-            pass
         return True
     print("Services Delete",obj_path)
     deallocate(obj_path)
