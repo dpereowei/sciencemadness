@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
 # Refactored version 0.99.12‑dev
-# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
-# This code is released under the GNU Public License v3.0
+# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
+# This code is released under the GNU Public License v3.0
 # https://www.gnu.org/licenses/gpl‑3.0.en.html
 #
-# Requires: Python 3, dasbus ≥ 1.6, BlueZ 5
+# Requires: Python 3, dasbus ≥ 1.6, BlueZ 5
 # Same temperature logging interface as v0.99.11 — writes /tmp/thermal.dat
 #
 # ---------------------------------------------------------------------
