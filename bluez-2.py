@@ -182,18 +182,39 @@ class InkbirdMonitor:
         self.manager.InterfacesAdded.connect(self.on_added)
         self.manager.InterfacesRemoved.connect(self.on_removed)
         GLib.timeout_add_seconds(int(WATCHTIME),self.scan_dbus)
+        # Watchdog: check every 15 s for disconnected devices
+        GLib.timeout_add_seconds(15, self.watchdog)
 
-    def on_added(self,obj_path,obj_dict):
-        if DEVICE_IFACE in obj_dict:
-            props=obj_dict[DEVICE_IFACE]
-            name=props.get('Name').unpack() if 'Name' in props else ''
-            if name in (INKBIRD_NAME,FRIENDLY_NAME):
-                if obj_path in self.inkbirds:
-                    dprint(f"[≡] Already known {obj_path}")
-                    return
-                dev=InkbirdDevice(self.bus,obj_path,props)
-                self.inkbirds[obj_path]=dev
-                dev.connect()
+    def on_added(self, obj_path, obj_dict):
+        """Handle new BlueZ objects (device discovery)."""
+        if DEVICE_IFACE not in obj_dict:
+            return
+        props = obj_dict[DEVICE_IFACE]
+        name = props.get("Name").unpack() if "Name" in props else ""
+        if name not in (INKBIRD_NAME, FRIENDLY_NAME):
+            return
+        # Check if we already know this path
+        existing = self.inkbirds.get(obj_path)
+        if existing:
+            # If previously disconnected, rebuild the proxy so reconnect works.
+            if not existing.connected:
+                dprint(f"[↻] Re‑creating proxy for {obj_path}")
+                try:
+                    existing.cleanup()
+                except Exception:
+                    pass
+                newdev = InkbirdDevice(self.bus, obj_path, props)
+                self.inkbirds[obj_path] = newdev
+                newdev.connect()
+            else:
+                # Still connected; ignore duplicate Added signal.
+                dprint(f"[≡] Still connected {obj_path}")
+            return
+        # Brand‑new discovery
+        dprint(f"[+] New Inkbird discovered {obj_path}")
+        newdev = InkbirdDevice(self.bus, obj_path, props)
+        self.inkbirds[obj_path] = newdev
+        newdev.connect()
 
     def on_removed(self,obj_path,ifaces):
         if obj_path in self.inkbirds:
@@ -210,6 +231,17 @@ class InkbirdMonitor:
                 self.on_added(p,d)
         except Exception as e:
             dprint(f"scan_dbus error {e}")
+        return True  # keep repeating
+    
+    def watchdog(self):
+        """Reconnect any devices that show Connected=False."""
+        for path, dev in list(self.inkbirds.items()):
+            try:
+                if not dev.proxy.Connected:
+                    dprint(f"[⚙] Watchdog reconnect {path}")
+                    dev.connect()
+            except Exception as e:
+                dprint(f"[⚠] Watchdog error {e}")
         return True  # keep repeating
 
     def run(self):
