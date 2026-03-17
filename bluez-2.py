@@ -86,6 +86,41 @@ class InkbirdDevice:
         self.bound=[]
         self.connected=False
         self.connect_signals()
+        
+    def reinitialize_inkbird(obj_path):
+        """Send the Inkbird pseudo‑pairing command sequence to kick Bluetooth
+        into its double‑blink handshake phase and synchronize with the sensor."""
+        from dasbus.typing import Variant
+        generic_init = [
+            Variant('ay',[0x02,0x01,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x02,0x02,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x02,0x04,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x02,0x08,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x04,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x06,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x08]),
+            Variant('ay',[0x0a,0x0f,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x0c,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x0f,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x11,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x13,0x00,0x00,0x00,0x00,0x00,0x00]),
+            Variant('ay',[0x18]),
+            Variant('ay',[0x24]),
+            Variant('ay',[0x26,0x01]),
+            Variant('ay',[0x26,0x02]),
+            Variant('ay',[0x26,0x04]),
+            Variant('ay',[0x26,0x08]),
+        ]
+        dprint(f"[‡] Re‑initializing {obj_path}")
+        try:
+            cmdproxy = commands.get(obj_path)
+            if not cmdproxy:
+                dprint(f"[!] No command characteristic for {obj_path}")
+                return
+            for seq in generic_init:
+                cmdproxy.WriteValue(seq, {"type": Variant("s","request")})
+        except Exception as e:
+            dprint(f"[!] Re‑init sequence failed for {obj_path}: {e}")
 
     # -------------
     def connect_signals(self):
@@ -130,6 +165,12 @@ class InkbirdDevice:
         try:
             allocate(self.obj_path)
             self.proxy.Trusted=True
+            dprint(f"[+] Services resolved for {self.obj_path}")
+            # original service‑binding logic …
+            try:
+                reinitialize_inkbird(self.obj_path)     # <‑‑ add back this line
+            except Exception as e:
+                dprint(f"[!] Re‑init failed: {e}")
         except Exception: pass
         dprint(f"[+] Services resolved for {self.obj_path}")
         for path,objdict in self.bus.get_proxy(SERVICE_NAME,'/').GetManagedObjects().items():
@@ -216,12 +257,11 @@ class InkbirdMonitor:
         self.inkbirds[obj_path] = newdev
         newdev.connect()
 
-    def on_removed(self,obj_path,ifaces):
-        if obj_path in self.inkbirds:
-            dprint(f"[−] Device removed {obj_path}")
+    def on_removed(self, obj_path, ifaces):
+        if DEVICE_IFACE in ifaces and obj_path in self.inkbirds:
+            dprint(f"[−] Top‑level device removed {obj_path}")
             self.inkbirds[obj_path].cleanup()
             del self.inkbirds[obj_path]
-            # keep offset freed for future rediscovery
             deallocate(obj_path)
 
     def scan_dbus(self):
@@ -311,10 +351,12 @@ def update_temperatures(obj_path,data):
 # Signal handling and entry point
 # ---------------------------------------------------------------------
 
-def shutdown(*a):
-    dprint("[!] Caught termination signal")
+def shutdown(sig):
+    dprint(f"[!] Caught signal {sig}, exiting.")
     fout.close()
-    raise SystemExit
+    loop = GLib.MainLoop().quit()
+GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, shutdown, signal.SIGINT)
+GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, shutdown, signal.SIGTERM)
 
 def main():
     signal.signal(signal.SIGINT,shutdown)
