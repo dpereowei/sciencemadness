@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
-# Refactored version 0.99.13‑dev  (stable integration build)
-# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
-# GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl‑3.0.en.html)
+# Refactored version 0.99.14‑dev  (handshake‑timing build)
+# GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl-3.0.en.html)
 #
-# Requires: Python 3 + Dasbus ≥ 1.6 + BlueZ 5
-# Logs temperatures to /tmp/thermal.dat exactly as v0.99.11
+# Requires Python 3 + Dasbus ≥ 1.6 + BlueZ 5
+# Logs temperatures to /tmp/thermal.dat (format identical to v0.99.11)
 # ---------------------------------------------------------------------
 
 import os, time, math, signal
@@ -14,7 +13,7 @@ from dasbus.loop import EventLoop, GLib
 from dasbus.typing import Variant
 
 # ---------------------------------------------------------------------
-# Constants and global variables (kept for compatibility)
+# Constants / globals (kept for compatibility)
 # ---------------------------------------------------------------------
 MAXTEMP = 1802.5
 WATCHTIME = 90.1
@@ -30,43 +29,41 @@ TEMPERATURE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb"
 MAXWAIT = 20
 DEBUG = True
 
-thermostamp   = [float("nan")] * 24
-thermofilter  = [0.0] * 24
-thermocount   = [0] * 24
-allocated_offsets = {}
-free_offsets      = {0:0,4:4,8:8,12:12,16:16,20:20}
-fout = open("/tmp/thermal.dat", "w")
+thermostamp   = [float("nan")]*24
+thermofilter  = [0.0]*24
+thermocount   = [0]*24
+allocated_offsets={}
+free_offsets = {0:0,4:4,8:8,12:12,16:16,20:20}
+fout=open("/tmp/thermal.dat","w")
 
-def dprint(*a, **kw):
-    if DEBUG: print(*a, **kw)
+def dprint(*a,**kw):
+    if DEBUG: print(*a,**kw)
 
 # ---------------------------------------------------------------------
 # Offset helpers
 # ---------------------------------------------------------------------
 def allocate(obj_path):
-    offset = 1e9
-    best = None
+    best=None; offset=1e9
     if obj_path in free_offsets:
-        best, offset = obj_path, free_offsets[obj_path]
+        best,offset=obj_path,free_offsets[obj_path]
     else:
-        for k, v in free_offsets.items():
-            if v < offset:
-                best, offset = k, v
+        for k,v in free_offsets.items():
+            if v<offset: best,offset=k,v
     if best is not None:
-        allocated_offsets[obj_path] = offset
+        allocated_offsets[obj_path]=offset
         del free_offsets[best]
 
 def deallocate(obj_path):
     if obj_path in allocated_offsets:
-        free_offsets[obj_path] = allocated_offsets[obj_path]
+        free_offsets[obj_path]=allocated_offsets[obj_path]
         del allocated_offsets[obj_path]
 
 # ---------------------------------------------------------------------
-# Send pairing/activate sequence (double‑blink trigger)
+# Send pairing / activate sequence (double‑blink)
 # ---------------------------------------------------------------------
 def reinitialize_inkbird(dev):
-    """Send Inkbird pseudo‑pairing command sequence."""
-    generic_init = [
+    """Transmit pseudo‑pairing sequence to trigger the handshake."""
+    seqs=[
         Variant('ay',[0x02,0x01,0,0,0,0,0]),
         Variant('ay',[0x02,0x02,0,0,0,0,0]),
         Variant('ay',[0x02,0x04,0,0,0,0,0]),
@@ -81,20 +78,18 @@ def reinitialize_inkbird(dev):
         Variant('ay',[0x13,0,0,0,0,0,0]),
         Variant('ay',[0x18]),
         Variant('ay',[0x24]),
-        Variant('ay',[0x26,0x01]),
-        Variant('ay',[0x26,0x02]),
-        Variant('ay',[0x26,0x04]),
-        Variant('ay',[0x26,0x08]),
+        Variant('ay',[0x26,0x01]),Variant('ay',[0x26,0x02]),
+        Variant('ay',[0x26,0x04]),Variant('ay',[0x26,0x08]),
     ]
     if not dev or not dev.command:
         dprint(f"[!] No command characteristic for {dev.obj_path}")
         return
     try:
         dprint(f"[‡] Re‑initializing {dev.obj_path}")
-        for seq in generic_init:
-            dev.command.WriteValue(seq, {"type": Variant("s","request")})
+        for s in seqs:
+            dev.command.WriteValue(s,{"type":Variant("s","request")})
     except Exception as e:
-        dprint(f"[!] Re‑init sequence failed {e}")
+        raise
 
 # ---------------------------------------------------------------------
 # InkbirdDevice
@@ -105,9 +100,7 @@ class InkbirdDevice:
         self.obj_path=obj_path
         self.name=props.get("Name").unpack() if "Name" in props else "?"
         self.proxy=bus.get_proxy(SERVICE_NAME,obj_path)
-        self.temperature=None
-        self.command=None
-        self.battery=None
+        self.temperature=self.command=self.battery=None
         self.connected=False
         self.connect_signals()
 
@@ -119,12 +112,11 @@ class InkbirdDevice:
         try:
             dprint(f"[+] Connecting {self.name} {self.obj_path}")
             self.proxy.Connect()
-        except Exception as e:
-            dprint(f"[!] connect() failed {e}")
+        except Exception as e: dprint(f"[!] connect() failed {e}")
 
     def cleanup(self):
         dprint(f"[!] Cleaning up {self.obj_path}")
-        for p in (self.temperature, self.command, self.battery):
+        for p in (self.temperature,self.command,self.battery):
             try:
                 if p: p.StopNotify()
             except Exception: pass
@@ -139,6 +131,7 @@ class InkbirdDevice:
             dprint(f"    ServicesResolved={ready}")
             if ready: self.on_services_resolved()
 
+    # -----------------------------------------------------------------
     def on_services_resolved(self):
         try:
             allocate(self.obj_path)
@@ -146,27 +139,41 @@ class InkbirdDevice:
             mgr=self.bus.get_proxy(SERVICE_NAME,'/')
             for path,objdict in mgr.GetManagedObjects().items():
                 if not path.startswith(self.obj_path): continue
-                if GATT_CHAR_IFACE in objdict:
-                    uuid=objdict[GATT_CHAR_IFACE]["UUID"].unpack()
-                    proxy=self.bus.get_proxy(SERVICE_NAME,path)
-                    if uuid=="0000ff01-0000-1000-8000-00805f9b34fb":
-                        self.temperature=proxy
-                        proxy.PropertiesChanged.connect(
-                            lambda a,b,c:self.temp_cb(a,b,c))
-                        proxy.StartNotify()
-                    elif uuid=="0000ff02-0000-1000-8000-00805f9b34fb":
-                        self.command=proxy
-                    elif uuid=="00002a19-0000-1000-8000-00805f9b34fb":
-                        self.battery=proxy
-                        proxy.PropertiesChanged.connect(
-                            lambda a,b,c:self.batt_cb(a,b,c))
-                        proxy.StartNotify()
-            reinitialize_inkbird(self)
+                if GATT_CHAR_IFACE not in objdict: continue
+                uuid=objdict[GATT_CHAR_IFACE]["UUID"].unpack()
+                proxy=self.bus.get_proxy(SERVICE_NAME,path)
+                if uuid=="0000ff01-0000-1000-8000-00805f9b34fb":
+                    self.temperature=proxy
+                    proxy.PropertiesChanged.connect(
+                        lambda a,b,c:self.temp_cb(a,b,c))
+                    proxy.StartNotify()
+                elif uuid=="0000ff02-0000-1000-8000-00805f9b34fb":
+                    self.command=proxy
+                elif uuid=="00002a19-0000-1000-8000-00805f9b34fb":
+                    self.battery=proxy
+                    proxy.PropertiesChanged.connect(
+                        lambda a,b,c:self.batt_cb(a,b,c))
+                    proxy.StartNotify()
+            # Wait 2 s for link security before sending handshake
+            GLib.timeout_add_seconds(2,self.start_handshake)
             dprint(f"[+] Bound services for {self.obj_path}")
         except Exception as e:
             dprint(f"[!] on_services_resolved error {e}")
 
-    # Notifications ----------------------------------------------------
+    def start_handshake(self):
+        """Deferred handshake – retry on ATT 0x0e errors."""
+        try:
+            reinitialize_inkbird(self)
+        except Exception as e:
+            msg=str(e)
+            if "ATT error: 0x0e" in msg:
+                dprint(f"[⟳] Handshake delayed (security), retry in 5 s")
+                GLib.timeout_add_seconds(5,self.start_handshake)
+            else:
+                dprint(f"[!] start_handshake failed {e}")
+        return False
+
+    # Callbacks --------------------------------------------------------
     def temp_cb(self,iface,objdict,inv):
         if "Value" not in objdict: return
         data=objdict["Value"].unpack()
@@ -192,8 +199,8 @@ class InkbirdMonitor:
         self.inkbirds={}
         self.manager.InterfacesAdded.connect(self.on_added)
         self.manager.InterfacesRemoved.connect(self.on_removed)
-        GLib.timeout_add_seconds(int(WATCHTIME), self.scan_dbus)
-        GLib.timeout_add_seconds(15, self.watchdog)
+        GLib.timeout_add_seconds(int(WATCHTIME),self.scan_dbus)
+        GLib.timeout_add_seconds(15,self.watchdog)
 
     def on_added(self,obj_path,obj_dict):
         if DEVICE_IFACE not in obj_dict: return
@@ -207,48 +214,45 @@ class InkbirdMonitor:
                 try: dev.cleanup()
                 except Exception: pass
                 newdev=InkbirdDevice(self.bus,obj_path,props)
-                self.inkbirds[obj_path]=newdev
-                newdev.connect()
+                self.inkbirds[obj_path]=newdev; newdev.connect()
             return
         dprint(f"[+] New Inkbird {obj_path}")
-        newdev=InkbirdDevice(self.bus,obj_path,props)
-        self.inkbirds[obj_path]=newdev
-        newdev.connect()
+        d=InkbirdDevice(self.bus,obj_path,props)
+        self.inkbirds[obj_path]=d; d.connect()
 
     def on_removed(self,obj_path,ifaces):
         if DEVICE_IFACE in ifaces and obj_path in self.inkbirds:
             dprint(f"[−] Device removed {obj_path}")
-            try: self.inkbirds[obj_path].cleanup()
+            try:self.inkbirds[obj_path].cleanup()
             except Exception: pass
-            del self.inkbirds[obj_path]
-            deallocate(obj_path)
+            del self.inkbirds[obj_path]; deallocate(obj_path)
 
     def scan_dbus(self):
         try:
             for p,d in self.manager.GetManagedObjects().items():
                 self.on_added(p,d)
-        except Exception as e:
-            dprint(f"scan error {e}")
+        except Exception as e: dprint(f"scan error {e}")
         return True
 
     def watchdog(self):
-        """Reconnect any devices that show Connected=False.
-           Restart discovery if nothing present."""
+        """Reconnect if disconnected; restart discovery if none."""
         for p,dev in list(self.inkbirds.items()):
             try:
                 if not dev.proxy.Connected:
                     dprint(f"[⚙] Watchdog reconnect {p}")
                     dev.connect()
-            except Exception: dprint(f"[⚠] Watchdog error")
+            except Exception as e: dprint(f"[⚠] Watchdog error {e}")
         if not self.inkbirds:
-            dprint("[🔍] No devices known, restart discovery")
-            try: self.adapter.StartDiscovery()
+            try:
+                disc=self.adapter.Get(PROP_IFACE,"Discovering")
+                if not disc:
+                    dprint("[🔍] Restart discovery")
+                    self.adapter.StartDiscovery()
             except Exception as e: dprint(f"[!] discovery failed {e}")
         return True
 
     def run(self):
-        dprint("[*] InkbirdMonitor running")
-        self.loop.run()
+        dprint("[*] InkbirdMonitor running"); self.loop.run()
 
 # ---------------------------------------------------------------------
 # Logger
@@ -265,43 +269,39 @@ class InkbirdLogger:
             if thermocount[i]==0: stamp=True
         if stamp:
             t=time.time()
-            print(f"{t:6.2f} ", end="", file=fout)
+            print(f"{t:6.2f} ",end="",file=fout)
             for v in thermostamp:
-                print(f"{v if v<MAXTEMP else float('nan'):6.1f} ", end="", file=fout)
-            print(" [°C]", file=fout)
-            fout.flush()
+                print(f"{v if v<MAXTEMP else float('nan'):6.1f} ",end="",file=fout)
+            print(" [°C]",file=fout); fout.flush()
             for i in range(len(thermocount)):
                 thermocount[i]=(thermocount[i]+1 if thermocount[i]<MAXWAIT else 0)
             self.laststamp=t
         return True
 
 # ---------------------------------------------------------------------
-# Temperature update math
+# Temperature update
 # ---------------------------------------------------------------------
 def update_temperatures(obj_path,data):
     def temp(ls,ms): return (((ms^0x80)<<8)+ls-0x8000-320)/18
-    if data[8:12]!=[0xFE,0x7F,0xFE,0x7F]:
-        dprint("Suspicious packet",data); return
+    if data[8:12]!=[0xFE,0x7F,0xFE,0x7F]: dprint("Suspicious",data); return
     t4=[temp(*data[2*i:2*i+2]) for i in range(4)]
     offs=allocated_offsets.get(obj_path,0)
     for i,val in enumerate(t4):
         idx=int(offs+i)
-        vlast=thermostamp[idx]
-        redundant=thermocount[idx]
-        if redundant and redundant<MAXWAIT and (val==vlast or val==thermofilter[idx]):
-            continue
+        vlast=thermostamp[idx]; red=thermocount[idx]
+        if red and red<MAXWAIT and (val==vlast or val==thermofilter[idx]): continue
         if abs(val-vlast)>1.5:
             thermostamp[idx]=val if val>MAXTEMP or vlast>MAXTEMP else (val+vlast)/2
             thermofilter[idx]=thermostamp[idx]; continue
         thermofilter[idx]=thermostamp[idx]=val; thermocount[idx]=0
 
 # ---------------------------------------------------------------------
-# Graceful shutdown hooks via GLib
+# Graceful shutdown
 # ---------------------------------------------------------------------
 def shutdown(sig):
-    dprint(f"[!] Caught signal {sig}, exiting.")
-    try: fout.close()
-    except Exception: pass
+    dprint(f"[!] Signal {sig}, exiting.")
+    try:fout.close()
+    except Exception:pass
     GLib.MainLoop().quit()
 
 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT,  shutdown, signal.SIGINT)
@@ -309,9 +309,7 @@ GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, shutdown, signal.SIG
 
 # ---------------------------------------------------------------------
 def main():
-    InkbirdLogger()
-    mon=InkbirdMonitor()
-    mon.run()
+    InkbirdLogger(); mon=InkbirdMonitor(); mon.run()
 
 if __name__=="__main__":
     main()
