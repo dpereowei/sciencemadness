@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
-# Refactored version 0.99.14‑dev  (handshake‑timing build)
-# GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl-3.0.en.html)
+# Refactored version 0.99.15‑dev (notification‑triggered handshake)
+# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
+# GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl‑3.0.en.html)
 #
-# Requires Python 3 + Dasbus ≥ 1.6 + BlueZ 5
-# Logs temperatures to /tmp/thermal.dat (format identical to v0.99.11)
+# Requires: Python 3 + Dasbus ≥ 1.6 + BlueZ 5
+# Same /tmp/thermal.dat logging format as v0.99.11
 # ---------------------------------------------------------------------
 
-import os, time, math, signal
+import time, math, signal
 from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop, GLib
 from dasbus.typing import Variant
 
-# ---------------------------------------------------------------------
-# Constants / globals (kept for compatibility)
 # ---------------------------------------------------------------------
 MAXTEMP = 1802.5
 WATCHTIME = 90.1
@@ -25,7 +24,6 @@ DEVICE_IFACE = "org.bluez.Device1"
 PROP_IFACE = "org.freedesktop.DBus.Properties"
 GATT_SERVICE_IFACE = "org.bluez.GattService1"
 GATT_CHAR_IFACE = "org.bluez.GattCharacteristic1"
-TEMPERATURE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb"
 MAXWAIT = 20
 DEBUG = True
 
@@ -39,8 +37,6 @@ fout=open("/tmp/thermal.dat","w")
 def dprint(*a,**kw):
     if DEBUG: print(*a,**kw)
 
-# ---------------------------------------------------------------------
-# Offset helpers
 # ---------------------------------------------------------------------
 def allocate(obj_path):
     best=None; offset=1e9
@@ -59,10 +55,8 @@ def deallocate(obj_path):
         del allocated_offsets[obj_path]
 
 # ---------------------------------------------------------------------
-# Send pairing / activate sequence (double‑blink)
-# ---------------------------------------------------------------------
 def reinitialize_inkbird(dev):
-    """Transmit pseudo‑pairing sequence to trigger the handshake."""
+    """Send Inkbird pseudo‑pairing command sequence (double‑blink trigger)."""
     seqs=[
         Variant('ay',[0x02,0x01,0,0,0,0,0]),
         Variant('ay',[0x02,0x02,0,0,0,0,0]),
@@ -76,8 +70,7 @@ def reinitialize_inkbird(dev):
         Variant('ay',[0x0f,0,0,0,0,0,0]),
         Variant('ay',[0x11,0,0,0,0,0,0]),
         Variant('ay',[0x13,0,0,0,0,0,0]),
-        Variant('ay',[0x18]),
-        Variant('ay',[0x24]),
+        Variant('ay',[0x18]),Variant('ay',[0x24]),
         Variant('ay',[0x26,0x01]),Variant('ay',[0x26,0x02]),
         Variant('ay',[0x26,0x04]),Variant('ay',[0x26,0x08]),
     ]
@@ -89,19 +82,17 @@ def reinitialize_inkbird(dev):
         for s in seqs:
             dev.command.WriteValue(s,{"type":Variant("s","request")})
     except Exception as e:
-        raise
+        dprint(f"[!] Re‑init sequence failed {e}")
 
-# ---------------------------------------------------------------------
-# InkbirdDevice
 # ---------------------------------------------------------------------
 class InkbirdDevice:
     def __init__(self,bus,obj_path,props):
-        self.bus=bus
-        self.obj_path=obj_path
+        self.bus=bus; self.obj_path=obj_path
         self.name=props.get("Name").unpack() if "Name" in props else "?"
         self.proxy=bus.get_proxy(SERVICE_NAME,obj_path)
         self.temperature=self.command=self.battery=None
         self.connected=False
+        self.ready_for_handshake=False
         self.connect_signals()
 
     def connect_signals(self):
@@ -120,15 +111,16 @@ class InkbirdDevice:
             try:
                 if p: p.StopNotify()
             except Exception: pass
+        self.ready_for_handshake=False
         deallocate(self.obj_path)
 
     def on_properties(self,iface,changed,inv):
         if "Connected" in changed:
             self.connected=changed["Connected"].unpack()
-            dprint(f"    Connected={self.connected}")
+            dprint(f"   Connected={self.connected}")
         if "ServicesResolved" in changed:
             ready=changed["ServicesResolved"].unpack()
-            dprint(f"    ServicesResolved={ready}")
+            dprint(f"   ServicesResolved={ready}")
             if ready: self.on_services_resolved()
 
     # -----------------------------------------------------------------
@@ -136,7 +128,7 @@ class InkbirdDevice:
         try:
             allocate(self.obj_path)
             self.proxy.Trusted=True
-            mgr=self.bus.get_proxy(SERVICE_NAME,'/')
+            mgr=self.bus.get_proxy(SERVICE_NAME,"/")
             for path,objdict in mgr.GetManagedObjects().items():
                 if not path.startswith(self.obj_path): continue
                 if GATT_CHAR_IFACE not in objdict: continue
@@ -154,29 +146,30 @@ class InkbirdDevice:
                     proxy.PropertiesChanged.connect(
                         lambda a,b,c:self.batt_cb(a,b,c))
                     proxy.StartNotify()
-            # Wait 2 s for link security before sending handshake
-            GLib.timeout_add_seconds(2,self.start_handshake)
-            dprint(f"[+] Bound services for {self.obj_path}")
+            dprint(f"[+] Services bound for {self.obj_path}")
         except Exception as e:
             dprint(f"[!] on_services_resolved error {e}")
 
     def start_handshake(self):
-        """Deferred handshake – retry on ATT 0x0e errors."""
         try:
             reinitialize_inkbird(self)
         except Exception as e:
             msg=str(e)
             if "ATT error: 0x0e" in msg:
-                dprint(f"[⟳] Handshake delayed (security), retry in 5 s")
+                dprint(f"[⟳] Handshake delayed (retry 5 s)")
                 GLib.timeout_add_seconds(5,self.start_handshake)
             else:
                 dprint(f"[!] start_handshake failed {e}")
         return False
 
-    # Callbacks --------------------------------------------------------
+    # -----------------------------------------------------------------
     def temp_cb(self,iface,objdict,inv):
         if "Value" not in objdict: return
         data=objdict["Value"].unpack()
+        if not self.ready_for_handshake:
+            self.ready_for_handshake=True
+            dprint(f"[→] Notifications active → begin handshake {self.obj_path}")
+            GLib.timeout_add_seconds(1,self.start_handshake)
         if self.obj_path not in allocated_offsets:
             if self.proxy.Connected: allocate(self.obj_path)
             else: return
@@ -187,8 +180,6 @@ class InkbirdDevice:
             val=objdict["Value"].unpack()
             if val: dprint(f"Battery={val[0]}%")
 
-# ---------------------------------------------------------------------
-# InkbirdMonitor
 # ---------------------------------------------------------------------
 class InkbirdMonitor:
     def __init__(self):
@@ -235,7 +226,6 @@ class InkbirdMonitor:
         return True
 
     def watchdog(self):
-        """Reconnect if disconnected; restart discovery if none."""
         for p,dev in list(self.inkbirds.items()):
             try:
                 if not dev.proxy.Connected:
@@ -244,18 +234,16 @@ class InkbirdMonitor:
             except Exception as e: dprint(f"[⚠] Watchdog error {e}")
         if not self.inkbirds:
             try:
-                disc=self.adapter.Get(PROP_IFACE,"Discovering")
+                disc=self.adapter.Get("org.bluez.Adapter1","Discovering")
                 if not disc:
                     dprint("[🔍] Restart discovery")
                     self.adapter.StartDiscovery()
-            except Exception as e: dprint(f"[!] discovery failed {e}")
+            except Exception as e: dprint(f"[!] discovery check failed {e}")
         return True
 
     def run(self):
         dprint("[*] InkbirdMonitor running"); self.loop.run()
 
-# ---------------------------------------------------------------------
-# Logger
 # ---------------------------------------------------------------------
 class InkbirdLogger:
     def __init__(self):
@@ -279,8 +267,6 @@ class InkbirdLogger:
         return True
 
 # ---------------------------------------------------------------------
-# Temperature update
-# ---------------------------------------------------------------------
 def update_temperatures(obj_path,data):
     def temp(ls,ms): return (((ms^0x80)<<8)+ls-0x8000-320)/18
     if data[8:12]!=[0xFE,0x7F,0xFE,0x7F]: dprint("Suspicious",data); return
@@ -295,8 +281,6 @@ def update_temperatures(obj_path,data):
             thermofilter[idx]=thermostamp[idx]; continue
         thermofilter[idx]=thermostamp[idx]=val; thermocount[idx]=0
 
-# ---------------------------------------------------------------------
-# Graceful shutdown
 # ---------------------------------------------------------------------
 def shutdown(sig):
     dprint(f"[!] Signal {sig}, exiting.")
