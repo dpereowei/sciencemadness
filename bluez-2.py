@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
-# Refactored version 0.99.15‑dev (notification‑triggered handshake)
-# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
+# Version 0.99.16‑test (minimal activation sequence)
 # GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl‑3.0.en.html)
 #
-# Requires: Python 3 + Dasbus ≥ 1.6 + BlueZ 5
-# Same /tmp/thermal.dat logging format as v0.99.11
-# ---------------------------------------------------------------------
+# Everything else unchanged from v0.99.15 — but the activation
+# packet has been trimmed to 0xfd 0x00 to test for handshake.
 
 import time, math, signal
 from dasbus.connection import SystemMessageBus
 from dasbus.loop import EventLoop, GLib
 from dasbus.typing import Variant
 
-# ---------------------------------------------------------------------
-MAXTEMP = 1802.5
-WATCHTIME = 90.1
-INKBIRD_NAME = "IDT-34c-B"
-FRIENDLY_NAME = "INKBIRD"
-SERVICE_NAME = "org.bluez"
-ADAPTER_PATH = "/org/bluez/hci0"
-DEVICE_IFACE = "org.bluez.Device1"
-PROP_IFACE = "org.freedesktop.DBus.Properties"
-GATT_SERVICE_IFACE = "org.bluez.GattService1"
-GATT_CHAR_IFACE = "org.bluez.GattCharacteristic1"
-MAXWAIT = 20
-DEBUG = True
+MAXTEMP=1802.5
+WATCHTIME=90.1
+INKBIRD_NAME="IDT-34c-B"
+FRIENDLY_NAME="INKBIRD"
+SERVICE_NAME="org.bluez"
+ADAPTER_PATH="/org/bluez/hci0"
+DEVICE_IFACE="org.bluez.Device1"
+PROP_IFACE="org.freedesktop.DBus.Properties"
+GATT_SERVICE_IFACE="org.bluez.GattService1"
+GATT_CHAR_IFACE="org.bluez.GattCharacteristic1"
+MAXWAIT=20
+DEBUG=True
 
-thermostamp   = [float("nan")]*24
-thermofilter  = [0.0]*24
-thermocount   = [0]*24
+thermostamp=[float("nan")]*24
+thermofilter=[0.0]*24
+thermocount=[0]*24
 allocated_offsets={}
-free_offsets = {0:0,4:4,8:8,12:12,16:16,20:20}
+free_offsets={0:0,4:4,8:8,12:12,16:16,20:20}
 fout=open("/tmp/thermal.dat","w")
 
 def dprint(*a,**kw):
@@ -55,34 +52,19 @@ def deallocate(obj_path):
         del allocated_offsets[obj_path]
 
 # ---------------------------------------------------------------------
+# Minimal activation packet
+# ---------------------------------------------------------------------
 def reinitialize_inkbird(dev):
-    """Send Inkbird pseudo‑pairing command sequence (double‑blink trigger)."""
-    seqs=[
-        Variant('ay',[0x02,0x01,0,0,0,0,0]),
-        Variant('ay',[0x02,0x02,0,0,0,0,0]),
-        Variant('ay',[0x02,0x04,0,0,0,0,0]),
-        Variant('ay',[0x02,0x08,0,0,0,0,0]),
-        Variant('ay',[0x04,0,0,0,0,0,0]),
-        Variant('ay',[0x06,0,0,0,0,0,0]),
-        Variant('ay',[0x08]),
-        Variant('ay',[0x0a,0x0f,0,0,0,0,0]),
-        Variant('ay',[0x0c,0,0,0,0,0,0]),
-        Variant('ay',[0x0f,0,0,0,0,0,0]),
-        Variant('ay',[0x11,0,0,0,0,0,0]),
-        Variant('ay',[0x13,0,0,0,0,0,0]),
-        Variant('ay',[0x18]),Variant('ay',[0x24]),
-        Variant('ay',[0x26,0x01]),Variant('ay',[0x26,0x02]),
-        Variant('ay',[0x26,0x04]),Variant('ay',[0x26,0x08]),
-    ]
+    """Send simple activation to enable Inkbird measurement (test)."""
     if not dev or not dev.command:
-        dprint(f"[!] No command characteristic for {dev.obj_path}")
+        dprint(f"[!] No command characteristic for {getattr(dev,'obj_path','?')}")
         return
     try:
-        dprint(f"[‡] Re‑initializing {dev.obj_path}")
-        for s in seqs:
-            dev.command.WriteValue(s,{"type":Variant("s","request")})
+        dprint(f"[‡] Activating {dev.obj_path}")
+        packet=Variant('ay',[0xfd,0x00,0,0,0,0,0])
+        dev.command.WriteValue(packet,{"type":Variant("s","request")})
     except Exception as e:
-        dprint(f"[!] Re‑init sequence failed {e}")
+        dprint(f"[!] Activation write failed {e}")
 
 # ---------------------------------------------------------------------
 class InkbirdDevice:
@@ -91,8 +73,7 @@ class InkbirdDevice:
         self.name=props.get("Name").unpack() if "Name" in props else "?"
         self.proxy=bus.get_proxy(SERVICE_NAME,obj_path)
         self.temperature=self.command=self.battery=None
-        self.connected=False
-        self.ready_for_handshake=False
+        self.connected=False; self.ready_for_handshake=False
         self.connect_signals()
 
     def connect_signals(self):
@@ -117,13 +98,12 @@ class InkbirdDevice:
     def on_properties(self,iface,changed,inv):
         if "Connected" in changed:
             self.connected=changed["Connected"].unpack()
-            dprint(f"   Connected={self.connected}")
+            dprint(f"  Connected={self.connected}")
         if "ServicesResolved" in changed:
             ready=changed["ServicesResolved"].unpack()
-            dprint(f"   ServicesResolved={ready}")
+            dprint(f"  ServicesResolved={ready}")
             if ready: self.on_services_resolved()
 
-    # -----------------------------------------------------------------
     def on_services_resolved(self):
         try:
             allocate(self.obj_path)
@@ -151,24 +131,17 @@ class InkbirdDevice:
             dprint(f"[!] on_services_resolved error {e}")
 
     def start_handshake(self):
-        try:
-            reinitialize_inkbird(self)
+        try: reinitialize_inkbird(self)
         except Exception as e:
-            msg=str(e)
-            if "ATT error: 0x0e" in msg:
-                dprint(f"[⟳] Handshake delayed (retry 5 s)")
-                GLib.timeout_add_seconds(5,self.start_handshake)
-            else:
-                dprint(f"[!] start_handshake failed {e}")
+            dprint(f"[!] start_handshake failed {e}")
         return False
 
-    # -----------------------------------------------------------------
     def temp_cb(self,iface,objdict,inv):
         if "Value" not in objdict: return
         data=objdict["Value"].unpack()
         if not self.ready_for_handshake:
             self.ready_for_handshake=True
-            dprint(f"[→] Notifications active → begin handshake {self.obj_path}")
+            dprint(f"[→] Notifications active → begin activation {self.obj_path}")
             GLib.timeout_add_seconds(1,self.start_handshake)
         if self.obj_path not in allocated_offsets:
             if self.proxy.Connected: allocate(self.obj_path)
@@ -186,7 +159,7 @@ class InkbirdMonitor:
         self.bus=SystemMessageBus()
         self.loop=EventLoop()
         self.manager=self.bus.get_proxy(SERVICE_NAME,"/")
-        self.adapter=self.bus.get_proxy(SERVICE_NAME,ADAPTER_PATH)
+        self.adapter=self.bus.get_proxy(SERVICE_NAME,"/org/bluez/hci0")
         self.inkbirds={}
         self.manager.InterfacesAdded.connect(self.on_added)
         self.manager.InterfacesRemoved.connect(self.on_removed)
@@ -204,8 +177,8 @@ class InkbirdMonitor:
                 dprint(f"[↻] Re‑creating proxy {obj_path}")
                 try: dev.cleanup()
                 except Exception: pass
-                newdev=InkbirdDevice(self.bus,obj_path,props)
-                self.inkbirds[obj_path]=newdev; newdev.connect()
+                new=InkbirdDevice(self.bus,obj_path,props)
+                self.inkbirds[obj_path]=new; new.connect()
             return
         dprint(f"[+] New Inkbird {obj_path}")
         d=InkbirdDevice(self.bus,obj_path,props)
@@ -247,15 +220,14 @@ class InkbirdMonitor:
 # ---------------------------------------------------------------------
 class InkbirdLogger:
     def __init__(self):
-        self.laststamp=time.time()
         GLib.timeout_add_seconds(1,self.tick)
     def tick(self):
         global thermostamp,thermofilter,thermocount
-        stamp=False
+        write=False
         for i,v in enumerate(thermostamp):
             if math.isnan(v): continue
-            if thermocount[i]==0: stamp=True
-        if stamp:
+            if thermocount[i]==0: write=True
+        if write:
             t=time.time()
             print(f"{t:6.2f} ",end="",file=fout)
             for v in thermostamp:
@@ -263,7 +235,6 @@ class InkbirdLogger:
             print(" [°C]",file=fout); fout.flush()
             for i in range(len(thermocount)):
                 thermocount[i]=(thermocount[i]+1 if thermocount[i]<MAXWAIT else 0)
-            self.laststamp=t
         return True
 
 # ---------------------------------------------------------------------
@@ -291,9 +262,8 @@ def shutdown(sig):
 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT,  shutdown, signal.SIGINT)
 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, shutdown, signal.SIGTERM)
 
-# ---------------------------------------------------------------------
 def main():
-    InkbirdLogger(); mon=InkbirdMonitor(); mon.run()
+    InkbirdLogger(); InkbirdMonitor().run()
 
 if __name__=="__main__":
     main()
