@@ -121,6 +121,9 @@ class InkbirdDevice:
                     proxy.StartNotify()
                 elif uuid=="0000ff02-0000-1000-8000-00805f9b34fb":
                     self.command=proxy
+                elif uuid == "0000ff05-0000-1000-8000-00805f9b34fb":
+                    self.command = proxy
+                    dprint(f"[+] Using ff05 control characteristic for {self.obj_path}")
                 elif uuid=="00002a19-0000-1000-8000-00805f9b34fb":
                     self.battery=proxy
                     proxy.PropertiesChanged.connect(
