@@ -70,7 +70,10 @@ class InkbirdDevice:
         self.connect_signals()
 
     def connect_signals(self):
+        if hasattr(self, "_sig_hooked") and self._sig_hooked:
+            return
         self.proxy.PropertiesChanged.connect(self.on_properties)
+        self._sig_hooked = True
 
     def connect(self):
         try:
