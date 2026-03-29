@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
+# Written November, 2025 - March, 2026 by Andrew Robinson of Scappoose, Pereowei Daniel.
 # Version 0.99.17‑dev (control‑0018 activation build)
-# Copyright © 2025‑2026 Andrew Robinson of Scappoose, Pereowei Daniel.
-# GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl‑3.0.en.html)
+# This code is released under the GNU public license, 3.0
+# https://www.gnu.org/licenses/gpl‑3.0.en.html
 #
+# # Pre-Requisites virtual python, and dasbus library.
+# Virtual python is required on most systems with system package installs of python.
+# V.P. allows a local user (not superuser) to install python packages without wrecking
+# the operating system's version of python.
+#
+# python3 -m venv --system-site-packages py_envs
+# pip3 install dasbus
+
+# Note, the inkbird protocol is proprietary and may change.
+# To list your active bluetooth devices and services do:
+# busctl tree org.bluez
+# busctl introspect "org.bluez" "/org/bluez/hci0/dev_xx_xx_xx_xx_xx_xx"
+
+# To log bluetooth bus activity for wireshark analysis:
+# sudo btmon > rpi.log
+# Scan
+# 
 # Automatically binds command channel service14/char0018 (write→0019)
 # Sends 0xFD 00 sequence immediately after ServicesResolved → double‑blink.
 # ---------------------------------------------------------------------
