@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Read temperature from Inkbird IDT‑34c‑B
 # Version 0.99.17‑dev (control‑0018 activation build)
-# Copyright © 2025‑2026 Andrew Robinson of Scappoose.
+# Copyright © 2025‑2026 Andrew Robinson of Scappoose, Pereowei Daniel.
 # GPL v3 — [gnu.org](https://www.gnu.org/licenses/gpl‑3.0.en.html)
 #
 # Automatically binds command channel service14/char0018 (write→0019)
@@ -32,226 +32,251 @@ allocated_offsets={}
 free_offsets={0:0,4:4,8:8,12:12,16:16,20:20}
 fout=open("/tmp/thermal.dat","w")
 
-def dprint(*a,**kw):
-    if DEBUG: print(*a,**kw)
+def dprint(*a, **kw):
+    if DEBUG:
+        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}]", *a, **kw)
 
-# ---------------------------------------------------------------------
 def allocate(p):
-    best=None;off=1e9
-    for k,v in free_offsets.items():
-        if v<off:best,off=k,v
+    if p in allocated_offsets:
+        return
+    best = None
+    off = 1e9
+    for k, v in free_offsets.items():
+        if v < off:
+            best, off = k, v
     if best is not None:
-        allocated_offsets[p]=off;del free_offsets[best]
+        allocated_offsets[p] = off
+        del free_offsets[best]
 
 def deallocate(p):
     if p in allocated_offsets:
-        free_offsets[p]=allocated_offsets[p];del allocated_offsets[p]
+        free_offsets[p] = allocated_offsets[p]
+        del allocated_offsets[p]
 
 # ---------------------------------------------------------------------
 def send_activation(dev):
-    """Immediate activation write (0xFD 00) to command characteristic."""
-    if not dev or not dev.command: 
-        dprint(f"[!] No command char for {getattr(dev,'obj_path','?')}");return
+    if not dev or not dev.command:
+        dprint(f"[!] No command char for {getattr(dev, 'obj_path', '?')}")
+        return
     try:
-        pkt=Variant('ay',[0xfd,0x00,0,0,0,0,0])
+        pkt = Variant('ay', [0xfd, 0x00, 0, 0, 0, 0, 0])
         dprint(f"[‡] Activating {dev.obj_path}")
-        dev.command.WriteValue(pkt,{"type":Variant("s","request")})
+        dev.command.WriteValue(pkt, {"type": Variant("s", "request")})
     except Exception as e:
-        dprint(f"[!] Activation failed {e}")
+        dprint(f"[!] Activation failed: {e}")
 
 # ---------------------------------------------------------------------
 class InkbirdDevice:
-    def __init__(self,bus,obj_path,props):
-        self.bus=bus;self.obj_path=obj_path
-        self.name=props.get("Name").unpack() if "Name" in props else "?"
-        self.proxy=bus.get_proxy(SERVICE_NAME,obj_path)
-        self.temperature=self.command=self.battery=None
-        self.connected=False;self.binds_done=False
+    def __init__(self, bus, obj_path, props):
+        self.bus = bus
+        self.obj_path = obj_path
+        self.name = props.get("Name").unpack() if "Name" in props else "?"
+        self.proxy = bus.get_proxy(SERVICE_NAME, obj_path)
+        self.temperature = self.command = self.battery = None
+        self.connected = False
+        self.binds_done = False
+        self.offset = None
         self.connect_signals()
 
     def connect_signals(self):
-        if hasattr(self, "_sig_hooked") and self._sig_hooked:
-            return
         self.proxy.PropertiesChanged.connect(self.on_properties)
-        self._sig_hooked = True
 
     def connect(self):
         try:
             dprint(f"[+] Connecting {self.name} {self.obj_path}")
             self.proxy.Connect()
-        except Exception as e:dprint(f"[!] connect failed {e}")
+            self.proxy.Trusted = True
+        except Exception as e:
+            dprint(f"[!] Connect failed: {e}")
 
     def cleanup(self):
         dprint(f"[!] Cleaning {self.obj_path}")
-        for p in (self.temperature,self.command,self.battery):
+        for p in (self.temperature, self.command, self.battery):
             try:
-                if p:p.StopNotify()
-            except Exception:pass
-        deallocate(self.obj_path);self.binds_done=False
+                if p:
+                    p.StopNotify()
+            except Exception:
+                pass
+        deallocate(self.obj_path)
+        self.binds_done = False
 
-    def on_properties(self,iface,changed,inv):
+    def on_properties(self, iface, changed, inv):
         if "Connected" in changed:
-            self.connected=changed["Connected"].unpack()
-            dprint(f"  Connected={self.connected}")
-        if "ServicesResolved" in changed:
-            ready=changed["ServicesResolved"].unpack()
-            dprint(f"  ServicesResolved={ready}")
-            if ready: self.on_services_resolved()
+            self.connected = changed["Connected"].unpack()
+            dprint(f"  Connected={self.connected} for {self.obj_path}")
+            if not self.connected:
+                self.cleanup()
+
+        if "ServicesResolved" in changed and changed["ServicesResolved"].unpack():
+            dprint(f"  ServicesResolved=True for {self.obj_path}")
+            if not self.binds_done:
+                self.on_services_resolved()
 
     def on_services_resolved(self):
-        """Bind GATT chars + schedule immediate activation."""
-        try:
-            if self.binds_done: return
-            allocate(self.obj_path)
-            self.proxy.Trusted=True
-            mgr=self.bus.get_proxy(SERVICE_NAME,"/")
-            for path,objdict in mgr.GetManagedObjects().items():
-                if not path.startswith(self.obj_path): continue
-                if GATT_CHAR_IFACE not in objdict: continue
-                uuid=objdict[GATT_CHAR_IFACE]["UUID"].unpack()
-                proxy=self.bus.get_proxy(SERVICE_NAME,path)
-                if uuid=="0000ff01-0000-1000-8000-00805f9b34fb":
-                    self.temperature=proxy
-                    proxy.PropertiesChanged.connect(
-                        lambda *a,**k:self.temp_cb(*a,**k))
-                    proxy.StartNotify()
-                # Prefer char0018 (write→0019)
-                elif "/char0018" in path or uuid=="0000ff02-0000-1000-8000-00805f9b34fb":
-                    self.command=proxy
-                    dprint(f"[+] Command bound {path}")
-                elif uuid=="00002a19-0000-1000-8000-00805f9b34fb":
-                    self.battery=proxy
-                    proxy.PropertiesChanged.connect(
-                        lambda *a,**k:self.batt_cb(*a,**k))
-                    proxy.StartNotify()
-            self.binds_done=True
-            GLib.timeout_add_seconds(1, lambda: send_activation(self))
-        except Exception as e:dprint(f"[!] on_services_resolved error {e}")
+        allocate(self.obj_path)
+        self.offset = allocated_offsets.get(self.obj_path, 0)
+        dprint(f"[+] Allocated offset {self.offset} for {self.obj_path}")
 
-    def temp_cb(self,iface,objdict,inv):
-        if "Value" not in objdict: return
-        data=objdict["Value"].unpack()
-        if self.obj_path not in allocated_offsets:
-            if self.proxy.Connected: allocate(self.obj_path)
-            else:return
-        update_temperatures(self.obj_path,data)
+        mgr = self.bus.get_proxy(SERVICE_NAME, "/")
+        for path, objdict in mgr.GetManagedObjects().items():
+            if not path.startswith(self.obj_path):
+                continue
+            if GATT_CHAR_IFACE not in objdict:
+                continue
 
-    def batt_cb(self,iface,objdict,inv):
-        if "Value" in objdict:
-            val=objdict["Value"].unpack()
-            if val:dprint(f"Battery={val[0]}%")
+            uuid = objdict[GATT_CHAR_IFACE]["UUID"].unpack()
+            proxy = self.bus.get_proxy(SERVICE_NAME, path)
+
+            if uuid == "0000ff01-0000-1000-8000-00805f9b34fb":
+                self.temperature = proxy
+                proxy.PropertiesChanged.connect(self.temp_cb)
+                proxy.StartNotify()
+                dprint(f"[+] Temperature notify bound for {self.obj_path}")
+
+            elif uuid == "0000ff02-0000-1000-8000-00805f9b34fb" or "/char0018" in path:
+                self.command = proxy
+                dprint(f"[+] Command char bound for {self.obj_path}")
+
+            elif uuid == "00002a19-0000-1000-8000-00805f9b34fb":
+                self.battery = proxy
+                proxy.PropertiesChanged.connect(self.batt_cb)
+                proxy.StartNotify()
+
+        self.binds_done = True
+        GLib.timeout_add_seconds(1, lambda: send_activation(self))
+
+    def temp_cb(self, iface, changed, inv):
+        if "Value" not in changed:
+            return
+        data = changed["Value"].unpack()
+        update_temperatures(self.obj_path, data)
+
+    def batt_cb(self, iface, changed, inv):
+        if "Value" in changed:
+            val = changed["Value"].unpack()
+            if val:
+                dprint(f"Battery {self.obj_path}: {val[0]}%")
+
+# ---------------------------------------------------------------------
+def update_temperatures(p, data):
+    def t(ls, ms):
+        return round(((ms ^ 0x80) << 8 + ls - 0x8000 - 320) / 18, 1)
+    if len(data) < 12 or data[8:12] != [0xFE, 0x7F, 0xFE, 0x7F]:
+        return
+    vals = [t(*data[2*i:2*i+2]) for i in range(4)]
+    off = allocated_offsets.get(p, 0)
+    for i, v in enumerate(vals):
+        idx = off + i
+        lv = thermostamp[idx]
+        r = thermocount[idx]
+        if r and r < MAXWAIT and (v == lv or v == thermofilter[idx]):
+            continue
+        if abs(v - lv) > 1.5:
+            thermostamp[idx] = v if v > MAXTEMP or lv > MAXTEMP else (v + lv) / 2
+            thermofilter[idx] = thermostamp[idx]
+            continue
+        thermofilter[idx] = thermostamp[idx] = v
+        thermocount[idx] = 0
+
+# ---------------------------------------------------------------------
+class InkbirdLogger:
+    def __init__(self):
+        GLib.timeout_add_seconds(1, self.tick)
+
+    def tick(self):
+        write = False
+        for i, v in enumerate(thermostamp):
+            if not math.isnan(v):
+                write = True
+                break
+        if write:
+            t = time.time()
+            line = f"{t:6.2f}  "
+            for v in thermostamp:
+                line += f"{v if v < MAXTEMP else float('nan'):6.1f} "
+            line += " [°C]"
+            print(line)
+            print(line, file=fout)
+            fout.flush()
+        return True
 
 # ---------------------------------------------------------------------
 class InkbirdMonitor:
     def __init__(self):
-        self.bus=SystemMessageBus()
-        self.loop=EventLoop()
-        self.manager=self.bus.get_proxy(SERVICE_NAME,"/")
-        self.adapter=self.bus.get_proxy(SERVICE_NAME,"/org/bluez/hci0")
-        self.inkbirds={}
+        self.bus = SystemMessageBus()
+        self.loop = EventLoop()
+        self.manager = self.bus.get_proxy(SERVICE_NAME, "/")
+        self.inkbirds = {}
         self.manager.InterfacesAdded.connect(self.on_added)
         self.manager.InterfacesRemoved.connect(self.on_removed)
-        GLib.timeout_add_seconds(int(WATCHTIME),self.scan)
-        GLib.timeout_add_seconds(15,self.watchdog)
+        GLib.timeout_add_seconds(int(WATCHTIME), self.scan)
+        GLib.timeout_add_seconds(20, self.watchdog)   # slower periodic scan
 
-    def on_added(self,p,d):
-        if DEVICE_IFACE not in d: return
-        props=d[DEVICE_IFACE]
-        name=props.get("Name").unpack() if "Name" in props else ""
-        if name not in (INKBIRD_NAME,FRIENDLY_NAME):return
-        dev=self.inkbirds.get(p)
-        if dev:
-            if not dev.connected:
-                dprint(f"[↻] Re‑creating proxy {p}")
-                try:dev.cleanup()
-                except Exception:pass
-                new=InkbirdDevice(self.bus,p,props)
-                self.inkbirds[p]=new;new.connect()
+    def on_added(self, p, d):
+        if DEVICE_IFACE not in d:
             return
-        dprint(f"[+] New Inkbird {p}")
-        dev=InkbirdDevice(self.bus,p,props)
-        self.inkbirds[p]=dev;dev.connect()
+        props = d[DEVICE_IFACE]
+        name = props.get("Name").unpack() if "Name" in props else ""
+        if name not in (INKBIRD_NAME, FRIENDLY_NAME):
+            return
 
-    def on_removed(self,p,i):
+        if p in self.inkbirds:
+            dev = self.inkbirds[p]
+            if not dev.connected:
+                dev.cleanup()
+                self.inkbirds[p] = InkbirdDevice(self.bus, p, props)
+                self.inkbirds[p].connect()
+            return
+
+        dprint(f"[+] New Inkbird {p}")
+        dev = InkbirdDevice(self.bus, p, props)
+        self.inkbirds[p] = dev
+        dev.connect()
+
+    def on_removed(self, p, i):
         if DEVICE_IFACE in i and p in self.inkbirds:
-            dprint(f"[−] Device removed {p}")
-            try:self.inkbirds[p].cleanup()
-            except Exception:pass
-            del self.inkbirds[p];deallocate(p)
+            dprint(f"[−] Removed {p}")
+            self.inkbirds[p].cleanup()
+            del self.inkbirds[p]
+            deallocate(p)
 
     def scan(self):
         try:
-            for p,d in self.manager.GetManagedObjects().items():
-                self.on_added(p,d)
-        except Exception as e:dprint(f"scan error {e}")
+            for p, d in self.manager.GetManagedObjects().items():
+                self.on_added(p, d)
+        except Exception as e:
+            dprint(f"scan error: {e}")
         return True
 
     def watchdog(self):
-        for p,dev in list(self.inkbirds.items()):
+        for p, dev in list(self.inkbirds.items()):
             try:
                 if not dev.proxy.Connected:
                     dprint(f"[⚙] Watchdog reconnect {p}")
                     dev.connect()
-            except Exception as e:dprint(f"[⚠] Watchdog error {e}")
-        if not self.inkbirds:
-            try:
-                disc=self.adapter.Get("org.bluez.Adapter1","Discovering")
-                if not disc:
-                    self.adapter.StartDiscovery()
-                    dprint("[🔍] Restart discovery")
-            except Exception as e:dprint(f"[!] discovery check failed {e}")
+            except Exception:
+                pass
         return True
 
     def run(self):
-        dprint("[*] InkbirdMonitor running");self.loop.run()
-
-# ---------------------------------------------------------------------
-class InkbirdLogger:
-    def __init__(self):GLib.timeout_add_seconds(1,self.tick)
-    def tick(self):
-        global thermostamp,thermofilter,thermocount
-        write=False
-        for i,v in enumerate(thermostamp):
-            if math.isnan(v): continue
-            if thermocount[i]==0: write=True
-        if write:
-            t=time.time()
-            print(f"{t:6.2f} ",end="",file=fout)
-            for v in thermostamp:
-                print(f"{v if v<MAXTEMP else float('nan'):6.1f} ",end="",file=fout)
-            print(" [°C]",file=fout);fout.flush()
-            for i in range(len(thermocount)):
-                thermocount[i]=(thermocount[i]+1 if thermocount[i]<MAXWAIT else 0)
-        return True
-
-# ---------------------------------------------------------------------
-def update_temperatures(p,data):
-    def t(ls,ms):return(((ms^0x80)<<8)+ls-0x8000-320)/18
-    if len(data)<12:return
-    if data[8:12]!=[0xFE,0x7F,0xFE,0x7F]:return
-    vals=[t(*data[2*i:2*i+2]) for i in range(4)]
-    off=allocated_offsets.get(p,0)
-    for i,v in enumerate(vals):
-        idx=int(off+i)
-        lv=thermostamp[idx];r=thermocount[idx]
-        if r and r<MAXWAIT and (v==lv or v==thermofilter[idx]):continue
-        if abs(v-lv)>1.5:
-            thermostamp[idx]=v if v>MAXTEMP or lv>MAXTEMP else (v+lv)/2
-            thermofilter[idx]=thermostamp[idx];continue
-        thermofilter[idx]=thermostamp[idx]=v;thermocount[idx]=0
+        dprint("[*] InkbirdMonitor running")
+        self.loop.run()
 
 # ---------------------------------------------------------------------
 def shutdown(sig):
-    dprint(f"[!] Signal {sig}, exit.")
-    try:fout.close()
-    except Exception:pass
+    dprint(f"[!] Signal {sig}, exiting")
+    try:
+        fout.close()
+    except Exception:
+        pass
     GLib.MainLoop().quit()
 
 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, shutdown, signal.SIGINT)
 GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, shutdown, signal.SIGTERM)
 
 def main():
-    InkbirdLogger();InkbirdMonitor().run()
+    InkbirdLogger()
+    InkbirdMonitor().run()
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
