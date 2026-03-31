@@ -48,6 +48,11 @@ thermofilter=[0.0]*24
 thermocount=[0]*24
 allocated_offsets={}
 free_offsets={0:0,4:4,8:8,12:12,16:16,20:20}
+
+# FIX: stable slot mapping
+device_slots={}
+free_slots=[0,4,8,12,16,20]
+
 fout=open("/tmp/thermal.dat","w")
 
 def dprint(*a):
